@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#090b12">
+<link rel="manifest" href="manifest.json">
+<title>NADE — Voice AI</title>
+<style>
+:root{--bg:#090b12;--card:#121622;--text:#f5f7ff;--muted:#9aa3b5;--accent:#7c5cff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#1a1730 0,#090b12 45%);color:var(--text);font-family:system-ui,-apple-system,sans-serif;min-height:100vh}
+.app{max-width:700px;margin:auto;min-height:100vh;padding:20px 16px 28px;display:flex;flex-direction:column}
+header{text-align:center;padding:18px 0}.logo{font-size:34px;font-weight:800;letter-spacing:3px}.sub{color:var(--muted);font-size:13px}
+.status{margin:8px auto 16px;background:#151a27;border:1px solid #252c3c;border-radius:999px;padding:7px 12px;color:#b8c0d2;font-size:12px;width:max-content}
+.chat{flex:1;overflow:auto;padding:4px 0 18px}.msg{padding:13px 15px;border-radius:18px;margin:9px 0;max-width:88%;white-space:pre-wrap;line-height:1.45}.user{margin-left:auto;background:#6d4ff0}.ai{background:var(--card);border:1px solid #22293a}
+.controls{position:sticky;bottom:0;background:linear-gradient(transparent,#090b12 20%);padding-top:18px}
+.row{display:flex;gap:9px}.input{flex:1;background:#121622;border:1px solid #2a3143;color:white;border-radius:16px;padding:14px;font-size:16px;outline:none}
+button{border:0;color:white;border-radius:15px;padding:13px 15px;font-weight:700;background:#22283a}button.primary{background:var(--accent)}button.mic{width:64px;height:64px;border-radius:50%;font-size:24px}button.active{background:#e44d72}
+.small{display:flex;justify-content:center;gap:8px;margin-top:9px}.small button{font-size:12px;padding:9px 11px;color:#c6cada}
+#progress{font-size:11px;color:#9aa3b5;text-align:center;margin-top:7px;min-height:16px}
+</style>
+</head>
+<body>
+<div class="app">
+<header><div class="logo">NADE</div><div class="sub">Your private, free voice AI</div></header>
+<div id="status" class="status">Starting…</div>
+<div id="chat" class="chat"></div>
+<div class="controls">
+<div class="row">
+<input id="input" class="input" placeholder="Type to NADE…" autocomplete="off">
+<button id="send" class="primary">Send</button>
+<button id="mic" class="mic" title="Talk">🎙️</button>
+</div>
+<div class="small">
+<button id="clear">Clear chat</button><button id="remember">Save last message</button><button id="install" hidden>Install</button>
+</div>
+<div id="progress"></div>
+</div>
+</div>
+<script type="module">
+import { pipeline } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.2/+esm";
+
+const MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct";
+const SYSTEM = `You are NADE, a friendly personal AI assistant. Be concise, useful and natural.
+The user is using you on an Android phone. Do not claim to control the phone unless a tool is actually available.
+If you do not know something, say so.`;
+
+const $ = id => document.getElementById(id);
+const chat = $("chat"), input = $("input"), status = $("status"), progress = $("progress");
+let messages = JSON.parse(localStorage.getItem("nade_messages") || "[]");
+let generator = null, listening = false, recognition = null, deferredPrompt = null;
+
+function render(){
+  chat.innerHTML="";
+  for(const m of messages.slice(-30)){
+    const d=document.createElement("div"); d.className="msg "+(m.role==="user"?"user":"ai"); d.textContent=m.content; chat.appendChild(d);
+  }
+  chat.scrollTop=chat.scrollHeight;
+}
+function save(){localStorage.setItem("nade_messages",JSON.stringify(messages.slice(-40)));render();}
+function add(role,content){messages.push({role,content});save();}
+function setStatus(s){status.textContent=s;}
+
+async function loadAI(){
+  setStatus("Loading NADE's local brain…");
+  progress.textContent="First launch downloads the AI model. Keep this tab open.";
+  try{
+    generator=await pipeline("text-generation",MODEL,{
+      device:"webgpu",
+      dtype:"q4"
+    });
+    setStatus("Ready — tap 🎙️ and talk");
+    progress.textContent="AI runs locally in your browser after the model is cached.";
+  }catch(e){
+    console.error(e);
+    setStatus("WebGPU unavailable");
+    progress.textContent="NADE needs a WebGPU-capable Chrome browser for the local AI brain.";
+  }
+}
+async function reply(userText){
+  if(!userText.trim()) return;
+  add("user",userText);
+  input.value="";
+  if(!generator){add("assistant","My local AI model is not ready yet. Please wait for it to finish loading, then try again.");return;}
+  setStatus("NADE is thinking…");
+  const context=messages.slice(-10);
+  try{
+    const out=await generator([{role:"system",content:SYSTEM},...context],{max_new_tokens:120,temperature:.7,do_sample:true});
+    let result=out?.[0]?.generated_text;
+    if(Array.isArray(result)) result=result[result.length-1]?.content;
+    if(!result) result="I couldn't generate a response.";
+    add("assistant",result);
+    speak(result);
+    setStatus("Ready — tap 🎙️ and talk");
+  }catch(e){
+    console.error(e); add("assistant","I hit a local-model error. Try again after reloading the page."); setStatus("Error");
+  }
+}
+function speak(text){
+  if(!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text); u.rate=1.02; u.pitch=1;
+  speechSynthesis.speak(u);
+}
+function setupSpeech(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){$("mic").disabled=true;setStatus("Voice input unavailable — type instead");return;}
+  recognition=new SR(); recognition.lang="en-IN"; recognition.interimResults=true; recognition.continuous=false;
+  recognition.onstart=()=>{listening=true;$("mic").classList.add("active");$("mic").textContent="⏹️";setStatus("Listening…");};
+  recognition.onresult=e=>{
+    let text="";
+    for(let i=e.resultIndex;i<e.results.length;i++) text+=e.results[i][0].transcript;
+    input.value=text;
+    if(e.results[e.results.length-1].isFinal) reply(text);
+  };
+  recognition.onerror=e=>{listening=false;$("mic").classList.remove("active");$("mic").textContent="🎙️";setStatus("Voice error: "+e.error);};
+  recognition.onend=()=>{listening=false;$("mic").classList.remove("active");$("mic").textContent="🎙️";if(status.textContent==="Listening…")setStatus("Ready");};
+}
+$("send").onclick=()=>reply(input.value);
+input.addEventListener("keydown",e=>{if(e.key==="Enter")reply(input.value)});
+$("mic").onclick=()=>{if(!recognition)return;if(listening)recognition.stop();else recognition.start();};
+$("clear").onclick=()=>{messages=[];save();speechSynthesis?.cancel();};
+$("remember").onclick=()=>{const last=[...messages].reverse().find(m=>m.role==="user");if(last){localStorage.setItem("nade_memory",last.content);alert("Saved to NADE memory.");}};
+window.addEventListener("beforeinstallprompt",e=>{e.preventDefault();deferredPrompt=e;$("install").hidden=false;});
+$("install").onclick=async()=>{if(deferredPrompt){deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;$("install").hidden=true;}};
+if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{}); render(); setupSpeech(); loadAI();
+</script>
+</body>
+</html>
